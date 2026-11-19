@@ -1,0 +1,246 @@
+diff --git a/src/common/config.h b/src/common/config.h
+index 94848e3..3c96757 100644
+--- a/src/common/config.h
++++ b/src/common/config.h
+@@ -162,8 +162,6 @@
+ #	define LOVE_ENABLE_VIDEO
+ #	define LOVE_ENABLE_WINDOW
+ 
+-#	define LOVE_ENABLE_ENET
+-#	define LOVE_ENABLE_LUASOCKET
+ #	define LOVE_ENABLE_LUA53
+ #endif
+ 
+diff --git a/src/love.cpp b/src/love.cpp
+index 97673a3..6484b56 100644
+--- a/src/love.cpp
++++ b/src/love.cpp
+@@ -261,8 +261,15 @@ static DoneAction runlove(int argc, char **argv, int &retval)
+ 	return done;
+ }
+ 
++#ifdef __SWITCH__
++extern "C" void switch_s2_early(void);
++#endif
++
+ int main(int argc, char **argv)
+ {
++#ifdef __SWITCH__
++	switch_s2_early();
++#endif
+ 	if (strcmp(LOVE_VERSION_STRING, love_version()) != 0)
+ 	{
+ 		printf("Version mismatch detected!\nLOVE binary is version %s\n"
+diff --git a/src/modules/event/sdl/Event.cpp b/src/modules/event/sdl/Event.cpp
+index c1f217a..34802fc 100644
+--- a/src/modules/event/sdl/Event.cpp
++++ b/src/modules/event/sdl/Event.cpp
+@@ -121,10 +121,19 @@ Event::~Event()
+ 	SDL_QuitSubSystem(SDL_INIT_EVENTS);
+ }
+ 
++#ifdef __SWITCH__
++extern "C" void switch_s2_touch_poll(void);
++extern "C" int switch_s2_pointer_active(void);
++#endif
++
+ void Event::pump()
+ {
+ 	exceptionIfInRenderPass("love.event.pump");
+ 
++#ifdef __SWITCH__
++	switch_s2_touch_poll();
++#endif
++
+ 	SDL_Event e;
+ 
+ 	while (SDL_PollEvent(&e))
+@@ -177,6 +186,19 @@ void Event::exceptionIfInRenderPass(const char *name)
+ 
+ Message *Event::convert(const SDL_Event &e)
+ {
++#ifdef __SWITCH__
++	// While the Joy-Con mouse is in use, its click buttons (L, ZL, R, ZR) must not reach the game as gamepad input:
++	// the game would switch to controller prompts and hide the cursor.
++	if (switch_s2_pointer_active())
++	{
++		if ((e.type == SDL_CONTROLLERBUTTONDOWN || e.type == SDL_CONTROLLERBUTTONUP) &&
++			(e.cbutton.button == SDL_CONTROLLER_BUTTON_LEFTSHOULDER || e.cbutton.button == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER))
++			return nullptr;
++		if (e.type == SDL_CONTROLLERAXISMOTION &&
++			(e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT || e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT))
++			return nullptr;
++	}
++#endif
+ 	Message *msg = nullptr;
+ 
+ 	std::vector<Variant> vargs;
+@@ -317,6 +339,11 @@ Message *Event::convert(const SDL_Event &e)
+ 	case SDL_FINGERDOWN:
+ 	case SDL_FINGERUP:
+ 	case SDL_FINGERMOTION:
++#ifdef __SWITCH__
++		// only the touches read by switch_s2_touch_poll (device 7) count
++		if (e.tfinger.touchId != 7)
++			break;
++#endif
+ 		// Touch events are disabled in OS X because we only actually want touch
+ 		// screen events, but most touch devices in OS X aren't touch screens
+ 		// (and SDL doesn't differentiate.) Non-screen touch devices like Mac
+diff --git a/src/modules/joystick/sdl/Joystick.cpp b/src/modules/joystick/sdl/Joystick.cpp
+index 5d860cc..584fa5e 100644
+--- a/src/modules/joystick/sdl/Joystick.cpp
++++ b/src/modules/joystick/sdl/Joystick.cpp
+@@ -646,10 +646,18 @@ EnumMap<Joystick::GamepadAxis, SDL_GameControllerAxis, Joystick::GAMEPAD_AXIS_MA
+ 
+ EnumMap<Joystick::GamepadButton, SDL_GameControllerButton, Joystick::GAMEPAD_BUTTON_MAX_ENUM>::Entry Joystick::gpButtonEntries[] =
+ {
++#ifdef __SWITCH__
++	// Nintendo layout: the button labelled A (right) acts as A, B (bottom) as B, X (top) as X, Y (left) as Y
++	{Joystick::GAMEPAD_BUTTON_A, SDL_CONTROLLER_BUTTON_B},
++	{Joystick::GAMEPAD_BUTTON_B, SDL_CONTROLLER_BUTTON_A},
++	{Joystick::GAMEPAD_BUTTON_X, SDL_CONTROLLER_BUTTON_Y},
++	{Joystick::GAMEPAD_BUTTON_Y, SDL_CONTROLLER_BUTTON_X},
++#else
+ 	{Joystick::GAMEPAD_BUTTON_A, SDL_CONTROLLER_BUTTON_A},
+ 	{Joystick::GAMEPAD_BUTTON_B, SDL_CONTROLLER_BUTTON_B},
+ 	{Joystick::GAMEPAD_BUTTON_X, SDL_CONTROLLER_BUTTON_X},
+ 	{Joystick::GAMEPAD_BUTTON_Y, SDL_CONTROLLER_BUTTON_Y},
++#endif
+ 	{Joystick::GAMEPAD_BUTTON_BACK, SDL_CONTROLLER_BUTTON_BACK},
+ 	{Joystick::GAMEPAD_BUTTON_GUIDE, SDL_CONTROLLER_BUTTON_GUIDE},
+ 	{Joystick::GAMEPAD_BUTTON_START, SDL_CONTROLLER_BUTTON_START},
+diff --git a/src/modules/love/boot.lua b/src/modules/love/boot.lua
+index 038cab6..bf79dde 100644
+--- a/src/modules/love/boot.lua
++++ b/src/modules/love/boot.lua
+@@ -57,7 +57,8 @@ function love.boot()
+ 	invalid_game_path = nil
+ 
+ 	-- Is this one of those fancy "fused" games?
+-	local can_has_game = pcall(love.filesystem.setSource, exepath)
++	local can_has_game = pcall(love.filesystem.setSource, "/switch/balatro/game")
++	if not can_has_game then can_has_game = pcall(love.filesystem.setSource, exepath) end
+ 
+ 	-- It's a fused game, don't parse --game argument
+ 	if can_has_game then
+@@ -320,6 +321,55 @@ function love.init()
+ 		love.filesystem._setAndroidSaveExternal(c.externalstorage)
+ 		love.filesystem.setIdentity(c.identity or love.filesystem.getIdentity(), c.appendidentity)
+ 		if love.filesystem.getInfo("main.lua") then
++			if love.graphics then
++				-- Switch 2: the console draws no mouse cursor, so one is drawn where the game wants it.
++				-- Clicking both sticks together turns the FPS counter on and off; the choice is kept in the save folder.
++				local present = love.graphics.present
++				local font
++				local showFps = love.filesystem.getInfo("fps_on") ~= nil
++				local held = false
++				love.graphics.present = function(...)
++					if love.graphics.isActive() then
++						local both = false
++						if love.joystick then
++							for _, joystick in ipairs(love.joystick.getJoysticks()) do
++								if joystick:isGamepad() and joystick:isGamepadDown("leftstick") and joystick:isGamepadDown("rightstick") then
++									both = true
++								end
++							end
++						end
++						if both and not held then
++							showFps = not showFps
++							if showFps then love.filesystem.write("fps_on", "") else love.filesystem.remove("fps_on") end
++						end
++						held = both
++
++						love.graphics.push("all")
++						love.graphics.origin()
++						if showFps then
++							font = font or love.graphics.newFont(22)
++							love.graphics.setFont(font)
++							love.graphics.setColor(0, 0, 0, 0.7)
++							love.graphics.print(love.timer.getFPS() .. " FPS", 13, 11)
++							love.graphics.setColor(1, 1, 0.2, 1)
++							love.graphics.print(love.timer.getFPS() .. " FPS", 12, 10)
++						end
++						if love.mouse and love.mouse.isVisible() then
++							local mx, my = love.mouse.getPosition()
++							love.graphics.translate(mx, my)
++							love.graphics.scale(1.5)
++							local arrow = {0, 0, 0, 17, 4.5, 13, 8, 21, 11, 19.5, 7.5, 12, 13, 12}
++							love.graphics.setColor(0, 0, 0, 1)
++							love.graphics.setLineWidth(2.5)
++							love.graphics.polygon("line", arrow)
++							love.graphics.setColor(1, 1, 1, 1)
++							love.graphics.polygon("fill", arrow)
++						end
++						love.graphics.pop()
++					end
++					return present(...)
++				end
++			end
+ 			require("main")
+ 		end
+ 	end
+diff --git a/src/modules/mouse/sdl/Mouse.cpp b/src/modules/mouse/sdl/Mouse.cpp
+index 8ff555e..d75f843 100644
+--- a/src/modules/mouse/sdl/Mouse.cpp
++++ b/src/modules/mouse/sdl/Mouse.cpp
+@@ -138,10 +138,18 @@ double Mouse::getY() const
+ 	return y;
+ }
+ 
++#ifdef __SWITCH__
++extern "C" int switch_s2_touch_pos(int *x, int *y);
++#endif
++
+ void Mouse::getPosition(double &x, double &y) const
+ {
+ 	int mx, my;
+ 	SDL_GetMouseState(&mx, &my);
++#ifdef __SWITCH__
++	// SDL knows nothing of the pointer and the touches we feed it, so the game gets the last position we saw
++	switch_s2_touch_pos(&mx, &my);
++#endif
+ 
+ 	x = (double) mx;
+ 	y = (double) my;
+diff --git a/src/modules/window/sdl/Window.cpp b/src/modules/window/sdl/Window.cpp
+index e9175f3..53d603b 100644
+--- a/src/modules/window/sdl/Window.cpp
++++ b/src/modules/window/sdl/Window.cpp
+@@ -54,6 +54,23 @@
+ #define APIENTRY
+ #endif
+ 
++#ifdef __SWITCH__
++// Asks the display for its highest refresh rate (120 Hz in handheld mode). Setting a swap interval withdraws the request,
++// so it is made again after every change, but not when the interval stays the same.
++extern "C" void switch_s2_set_frame_rates(void);
++static inline int switch_s2_swap_interval(int interval)
++{
++	static int last = -12345;
++	if (interval == last)
++		return 0;
++	last = interval;
++	int r = SDL_GL_SetSwapInterval(interval);
++	switch_s2_set_frame_rates();
++	return r;
++}
++#define SDL_GL_SetSwapInterval switch_s2_swap_interval
++#endif
++
+ namespace love
+ {
+ namespace window
+@@ -271,6 +288,12 @@ std::vector<Window::ContextAttribs> Window::getContextAttribsList() const
+ 		attribslist.insert(attribslist.end(), glescontexts.begin(), glescontexts.end());
+ 	}
+ 
++#ifdef __SWITCH__
++	// Desktop OpenGL goes through zink on the Switch 2 and takes the console down: only ES 3.0 is safe.
++	attribslist.clear();
++	attribslist.push_back({3, 0, true, debug});
++#endif
++
+ 	return attribslist;
+ }
+ 
